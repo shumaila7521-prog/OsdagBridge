@@ -1,3 +1,4 @@
+import math
 import os, yaml
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -787,7 +788,89 @@ class CustomWindow(QWidget):
         # Connect to input dock's value changed signals
         # This will update the CAD whenever any input field changes
         if hasattr(self.input_dock, 'input_value_changed'):
-            self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)        
+            self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)
+        self.cad_comp_widget.parameter_edit_requested.connect(
+            self._on_cad_parameter_edited
+        )
+
+    def _on_cad_parameter_edited(self, key: str, value: float) -> None:
+        editable_basic_keys = (KEY_SPAN, KEY_CARRIAGEWAY_WIDTH)
+        editable_additional_keys = (KEY_TS_GIRDER_SPACING, KEY_TS_DECK_THICKNESS)
+        if key not in editable_basic_keys and key not in editable_additional_keys:
+            return
+        if not math.isfinite(value) or value <= 0:
+            return
+
+        additional_inputs = self._additional_inputs_dialog
+        candidate = (
+            dict(additional_inputs.working_input_dict)
+            if additional_inputs is not None
+            else {}
+        )
+        candidate.update(self.input_dict)
+        candidate[key] = value
+
+        if key in editable_basic_keys:
+            validation = self.input_dock.validator.validate_basic_inputs(
+                key, candidate
+            )
+        else:
+            validator = (
+                additional_inputs.validator
+                if additional_inputs is not None
+                else self.input_dock.validator
+            )
+            validation = validator.validate_additional_inputs(key, candidate)
+
+        if validation is not None:
+            _, message = validation
+            CustomMessageBox(
+                title="Input Error",
+                text=message,
+                dialogType=MessageBoxType.Warning,
+            ).exec()
+            return
+
+        if key in editable_basic_keys:
+            inputs_to_solve = dict(self.input_dict)
+            inputs_to_solve[key] = value
+            try:
+                solve_extend_basic_input_dict(inputs_to_solve)
+            except Exception as exc:
+                self.input_dict[key] = value
+                bridge_logger.warning(
+                    f"Could not recompute derived CAD layout for {key}; "
+                    f"using the edited value: {exc}"
+                )
+            else:
+                self.input_dict.update(inputs_to_solve)
+                if hasattr(self.input_dock, "is_require_field_changed"):
+                    self.input_dock.is_require_field_changed = False
+        else:
+            self.input_dict[key] = value
+
+        if additional_inputs is not None:
+            additional_inputs.default_input_dict[key] = self.input_dict[key]
+            additional_inputs.working_input_dict[key] = self.input_dict[key]
+
+        self._sync_cad_parameter_field(key, self.input_dict[key])
+        self.cad_comp_widget.update_from_osdag_inputs(self.input_dict)
+
+    def _sync_cad_parameter_field(self, key: str, value) -> None:
+        if value is None:
+            return
+
+        fields = [self.input_dock]
+        if self._additional_inputs_dialog is not None:
+            fields.append(self._additional_inputs_dialog)
+        for field_parent in fields:
+            widget = field_parent.findChild(QLineEdit, key)
+            if widget is not None:
+                previous_signals_blocked = widget.blockSignals(True)
+                try:
+                    widget.setText(str(value))
+                finally:
+                    widget.blockSignals(previous_signals_blocked)
             
     # Function for saving input dictionary into an OSI file
     def saveOSI_inputs(self):
